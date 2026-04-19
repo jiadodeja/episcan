@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { MapContainer, TileLayer, CircleMarker, Tooltip } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
+import "./App.css";
 
 const API = "http://localhost:3001";
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
 function Pill({ color, children }) {
@@ -120,47 +122,147 @@ function AgentCard({ index, title, subtitle, status, statusColor, stats, accentC
   );
 }
 
+// ── countdown timer ─────────────────────────────────────────────────────────
+function CountdownTimer({ nextRunAt }) {
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    const update = () => {
+      const diff = Math.max(0, Math.round((nextRunAt - Date.now()) / 1000));
+      setSecs(diff);
+    };
+    update();
+    const t = setInterval(update, 1000);
+    return () => clearInterval(t);
+  }, [nextRunAt]);
+  const m = String(Math.floor(secs / 60)).padStart(2, "0");
+  const s = String(secs % 60).padStart(2, "0");
+  return (
+    <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text)" }}>
+      Next scan in <span style={{ color: "var(--text-hi)" }}>{m}:{s}</span>
+    </span>
+  );
+}
+
+// ── signals list panel ───────────────────────────────────────────────────────
+const SEV_COLOR = { high: "var(--red)", medium: "var(--amber)", low: "var(--green)" };
+const SEV_BG    = { high: "var(--red-dim)", medium: "var(--amber-dim)", low: "var(--green-dim)" };
+
+function SignalsList({ signals, onHover }) {
+  if (!signals.length) return (
+    <div style={{
+      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      height: 120, gap: 8, color: "var(--text)",
+    }}>
+      <span style={{ fontSize: 22 }}>◌</span>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 11, letterSpacing: "0.08em" }}>NO SIGNALS DETECTED</span>
+      <span style={{ fontSize: 11 }}>Run the pipeline or wait for next auto-scan</span>
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      {signals.map((s, i) => (
+        <div
+          key={i}
+          className="signal-row"
+          onMouseEnter={() => onHover(s)}
+          onMouseLeave={() => onHover(null)}
+          style={{
+            display: "grid",
+            gridTemplateColumns: "72px 1fr 70px 58px",
+            alignItems: "center",
+            gap: 0,
+            padding: "7px 20px",
+            borderBottom: "1px solid var(--border)",
+            cursor: "default",
+            background: "transparent",
+          }}
+        >
+          {/* severity badge */}
+          <div>
+            <span style={{
+              fontFamily: "var(--mono)", fontSize: 9, fontWeight: 600,
+              letterSpacing: "0.1em", textTransform: "uppercase",
+              color: SEV_COLOR[s.severity] || "var(--text)",
+              background: SEV_BG[s.severity] || "transparent",
+              padding: "2px 6px", borderRadius: 3,
+            }}>{s.severity}</span>
+          </div>
+          {/* disease + location */}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 500, fontSize: 12, color: "var(--text-hi)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {s.disease || "Unknown"}
+            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {s.location}
+            </div>
+          </div>
+          {/* confidence score */}
+          <div style={{ textAlign: "right" }}>
+            {s.confidence != null ? (
+              <span style={{
+                fontFamily: "var(--mono)", fontSize: 11,
+                color: s.confidence >= 0.8 ? "var(--red)" : s.confidence >= 0.6 ? "var(--amber)" : "var(--green)",
+              }}>{Math.round(s.confidence * 100)}%</span>
+            ) : (
+              <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text)" }}>—</span>
+            )}
+          </div>
+          {/* source badge */}
+          <div style={{ textAlign: "right" }}>
+            <span style={{
+              fontFamily: "var(--mono)", fontSize: 9, color: "var(--text)",
+              background: "var(--bg-card2)", border: "1px solid var(--border)",
+              padding: "2px 5px", borderRadius: 3, textTransform: "uppercase", letterSpacing: "0.06em",
+            }}>{s.source || "—"}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── main app ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tick, setTick]         = useState(0);
-  const [signals, setSignals]   = useState([]);       // synthesized outbreak signals
-  const [cdcCount, setCdcCount] = useState(0);        // raw CDC items fetched
-  const [newsCount, setNewsCount] = useState(0);      // raw news items fetched
-  const [synthStatus, setSynthStatus] = useState("standby"); // standby | running | done
-  const [lastRun, setLastRun]   = useState(null);
+  const [signals, setSignals]       = useState([]);
+  const [cdcCount, setCdcCount]     = useState(0);
+  const [newsCount, setNewsCount]   = useState(0);
+  const [promedCount, setPromedCount] = useState(0);
+  const [synthStatus, setSynthStatus] = useState("standby");
+  const [lastRun, setLastRun]     = useState(null);
+  const [nextRunAt, setNextRunAt] = useState(Date.now() + REFRESH_INTERVAL_MS);
   const [pipelineLog, setPipelineLog] = useState([]);
+  const [hoveredSignal, setHoveredSignal] = useState(null);
+  const intervalRef = useRef(null);
 
   const log = (msg) => setPipelineLog(prev => [`${new Date().toISOString().slice(11,19)} ${msg}`, ...prev].slice(0, 8));
-
-  // live clock
-  useEffect(() => {
-    const t = setInterval(() => setTick(n => n + 1), 5000);
-    return () => clearInterval(t);
-  }, []);
 
   const runPipeline = useCallback(async () => {
     setSynthStatus("running");
     setSignals([]);
     log("Pipeline started");
 
-    // Step 1 — fetch both feeds in parallel
+    // Step 1 — fetch all feeds in parallel
     let allItems = [];
     try {
-      const [cdcRes, newsRes] = await Promise.allSettled([
+      const [cdcRes, newsRes, promedRes] = await Promise.allSettled([
         fetch(`${API}/api/feeds/cdc`).then(r => r.json()),
         fetch(`${API}/api/feeds/news`).then(r => r.json()),
+        fetch(`${API}/api/feeds/promed`).then(r => r.json()),
       ]);
 
-      const cdcItems  = cdcRes.status  === "fulfilled" ? cdcRes.value.items  || [] : [];
-      const newsItems = newsRes.status === "fulfilled" ? newsRes.value.items || [] : [];
+      const cdcItems    = cdcRes.status    === "fulfilled" ? cdcRes.value.items    || [] : [];
+      const newsItems   = newsRes.status   === "fulfilled" ? newsRes.value.items   || [] : [];
+      const promedItems = promedRes.status === "fulfilled" ? promedRes.value.items || [] : [];
 
       setCdcCount(cdcItems.length);
       setNewsCount(newsItems.length);
-      log(`CDC: ${cdcItems.length} items  |  News: ${newsItems.length} items`);
+      setPromedCount(promedItems.length);
+      log(`CDC: ${cdcItems.length}  |  News: ${newsItems.length}  |  CIDRAP: ${promedItems.length}`);
 
       allItems = [
-        ...cdcItems.map(i  => ({ ...i, source: "cdc"  })),
-        ...newsItems.map(i => ({ ...i, source: "news" })),
+        ...cdcItems.map(i    => ({ ...i, source: "cdc"    })),
+        ...newsItems.map(i   => ({ ...i, source: "news"   })),
+        ...promedItems.map(i => ({ ...i, source: "cidrap" })),
       ];
     } catch (err) {
       log(`Feed fetch error: ${err.message}`);
@@ -190,8 +292,11 @@ export default function App() {
   // run once on mount, then every 5 minutes
   useEffect(() => {
     runPipeline();
-    const t = setInterval(runPipeline, 5 * 60 * 1000);
-    return () => clearInterval(t);
+    intervalRef.current = setInterval(() => {
+      setNextRunAt(Date.now() + REFRESH_INTERVAL_MS);
+      runPipeline();
+    }, REFRESH_INTERVAL_MS);
+    return () => clearInterval(intervalRef.current);
   }, [runPipeline]);
 
   const now = new Date();
@@ -216,7 +321,7 @@ export default function App() {
       icon: "◎",
       stats: [
         { label: "Signals captured (24h)", value: newsCount ? newsCount.toString() : "—" },
-        { label: "Sources monitored",       value: "3" },
+        { label: "Sources monitored",       value: "4" },
         { label: "Last scan",               value: lastRunStr },
         { label: "Noise filter rate",        value: "91.2%", accent: "var(--green)" },
       ],
@@ -231,8 +336,8 @@ export default function App() {
       accentColor: "var(--blue)",
       icon: "⊕",
       stats: [
-        { label: "Reports ingested",        value: cdcCount ? cdcCount.toString() : "—" },
-        { label: "Active feeds",             value: "2" },
+        { label: "Reports ingested",        value: (cdcCount + promedCount).toString() },
+        { label: "Active feeds",             value: "3" },
         { label: "Last sync",               value: lastRunStr },
         { label: "Parse error rate",         value: "0.02%", accent: "var(--green)" },
       ],
@@ -299,7 +404,8 @@ export default function App() {
           }}>SURVEILLANCE PLATFORM v0.3</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <button onClick={runPipeline} disabled={synthStatus === "running"} style={{
+          <CountdownTimer nextRunAt={nextRunAt} />
+          <button onClick={() => { setNextRunAt(Date.now() + REFRESH_INTERVAL_MS); runPipeline(); }} disabled={synthStatus === "running"} style={{
             fontFamily: "var(--mono)", fontSize: 10, letterSpacing: "0.08em",
             background: synthStatus === "running" ? "var(--border)" : "var(--amber-dim)",
             color: synthStatus === "running" ? "var(--text)" : "var(--amber)",
@@ -370,7 +476,7 @@ export default function App() {
               { label: "Signals Detected",   value: signals.length.toString(),  color: signals.length > 0 ? "var(--amber)" : "var(--text-hi)" },
               { label: "High Severity",       value: highCount.toString(),        color: highCount > 0 ? "var(--red)" : "var(--text-hi)" },
               { label: "Medium Severity",     value: midCount.toString(),          color: midCount > 0 ? "var(--amber)" : "var(--text-hi)" },
-              { label: "Sources Active",      value: "2",                         color: "var(--green)" },
+              { label: "Sources Active",      value: "3",                         color: "var(--green)" },
             ].map((s, i) => (
               <div key={i} style={{
                 flex: 1, padding: "14px 20px",
@@ -382,7 +488,7 @@ export default function App() {
             ))}
           </div>
 
-          {/* map */}
+          {/* map — signals list hidden for now */}
           <div style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}>
             <MapContainer
               center={[20, 0]} zoom={2}
@@ -390,25 +496,32 @@ export default function App() {
               zoomControl={false} attributionControl={false}
             >
               <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution="" />
-              {signals.filter(s => s.lat && s.lng).map((s, i) => (
-                <CircleMarker
-                  key={i}
-                  center={[s.lat, s.lng]}
-                  radius={severityRadius[s.severity] || 8}
-                  pathOptions={{
-                    color: severityColor[s.severity] || "#f59e0b",
-                    fillColor: severityColor[s.severity] || "#f59e0b",
-                    fillOpacity: 0.35,
-                    weight: 2,
-                  }}
-                >
-                  <Tooltip permanent={false} sticky>
-                    <div style={{ fontWeight: 600, marginBottom: 2 }}>{s.disease || "Unknown"}</div>
-                    <div>{s.location}</div>
-                    <div style={{ color: severityColor[s.severity], marginTop: 2, textTransform: "uppercase", fontSize: 10 }}>{s.severity}</div>
-                  </Tooltip>
-                </CircleMarker>
-              ))}
+              {signals.filter(sig => sig.lat && sig.lng).map((sig, i) => {
+                const isHovered = hoveredSignal && hoveredSignal.disease === sig.disease && hoveredSignal.location === sig.location;
+                return (
+                  <CircleMarker
+                    key={i}
+                    center={[sig.lat, sig.lng]}
+                    radius={isHovered ? (severityRadius[sig.severity] || 8) * 1.7 : (severityRadius[sig.severity] || 8)}
+                    pathOptions={{
+                      color: severityColor[sig.severity] || "#f59e0b",
+                      fillColor: severityColor[sig.severity] || "#f59e0b",
+                      fillOpacity: isHovered ? 0.7 : 0.35,
+                      weight: isHovered ? 3 : 2,
+                    }}
+                  >
+                    <Tooltip permanent={isHovered} sticky={!isHovered}>
+                      <div style={{ fontWeight: 600, marginBottom: 2 }}>{sig.disease || "Unknown"}</div>
+                      <div>{sig.location}</div>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 4 }}>
+                        <span style={{ color: severityColor[sig.severity], textTransform: "uppercase", fontSize: 10 }}>{sig.severity}</span>
+                        {sig.confidence != null && <span style={{ color: "#7a8aaa" }}>conf. {Math.round(sig.confidence * 100)}%</span>}
+                        {sig.source && <span style={{ color: "#7a8aaa", textTransform: "uppercase", fontSize: 10 }}>{sig.source}</span>}
+                      </div>
+                    </Tooltip>
+                  </CircleMarker>
+                );
+              })}
             </MapContainer>
 
             {/* map badge */}

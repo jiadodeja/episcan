@@ -41,7 +41,7 @@ async function fetchRSS(url) {
     headers: { "User-Agent": "EpiScan/1.0 (health surveillance research)" },
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} fetching ${url}`);
   log("📥", `RSS OK: ${url}`);
   return res.text();
 }
@@ -139,7 +139,42 @@ app.get("/api/feeds/news", async (req, res) => {
   }
 });
 
-// ── Synthesizer: ask Claude to extract location + severity from items ───────
+// ── CIDRAP endpoint ───────────────────────────────────
+app.get("/api/feeds/promed", async (req, res) => {
+  log("📡", "CIDRAP feed request received");
+  try {
+    const urls = [
+      "https://www.cidrap.umn.edu/news/49/rss",    // Avian Influenza
+      "https://www.cidrap.umn.edu/news/78/rss",    // Measles
+      "https://www.cidrap.umn.edu/news/230556/rss", // Mpox
+      "https://www.cidrap.umn.edu/news/64/rss",    // Ebola
+      "https://www.cidrap.umn.edu/news/91/rss",    // Public Health
+    ];
+    const results = await Promise.allSettled(urls.map(fetchRSS));
+    results.forEach((r, i) => {
+      if (r.status === "rejected") log("❌", `CIDRAP feed[${i}] error: ${r.reason?.message}`);
+    });
+    const seen = new Set();
+    const items = results
+      .filter(r => r.status === "fulfilled")
+      .flatMap(r => parseRSSItems(r.value))
+      .filter(item => {
+        if (seen.has(item.title)) return false;
+        seen.add(item.title);
+        return true;
+      })
+      .slice(0, 20);
+    const failed = results.filter(r => r.status === "rejected").length;
+    if (failed) log("⚠️", `CIDRAP: ${failed} feed(s) failed`);
+    log("✅", `CIDRAP feed done — ${items.length} items returned`);
+    res.json({ source: "promed", count: items.length, items });
+  } catch (err) {
+    log("❌", `CIDRAP feed error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.post("/api/synthesize", async (req, res) => {
   const { items } = req.body; // array of { title, description, source }
   log("🧠", `Synthesize request — ${items?.length ?? 0} items received`);
@@ -154,12 +189,13 @@ app.post("/api/synthesize", async (req, res) => {
 Given a list of news/health report headlines and descriptions, return a JSON array of signals.
 Each signal must have:
   - title: string (short headline)
-  - location: string (city, country, or region — infer from text; use "Global" if unclear)
+  - location: string (city, country, or region — infer from text; use "Global" if unclear; ALWAYS use standard English spelling e.g. "Africa" not "Afrika", "United States" not "USA")
   - lat: number (approximate latitude of location; use 0 if truly unknown)
   - lng: number (approximate longitude of location; use 0 if truly unknown)
   - severity: "low" | "medium" | "high"
   - disease: string (disease or syndrome name; use "General Health Alert" if unspecified)
   - source: string (the source field from the input item)
+  - confidence: number between 0.0 and 1.0 (how confident you are this is a real outbreak signal; 0.9+ for confirmed outbreaks, 0.5-0.8 for suspected, <0.5 for weak signals)
 Be INCLUSIVE: extract a signal for any item related to disease, illness, infection, health alert, outbreak, epidemic, pandemic, vaccination, or public health concern — even if it seems minor or routine.
 Do NOT filter items out unless they are completely unrelated to health (e.g. sports, finance, weather).
 Respond with ONLY a valid JSON array, no markdown, no explanation.`;
@@ -197,7 +233,24 @@ Respond with ONLY a valid JSON array, no markdown, no explanation.`;
     const cleaned = (start !== -1 && end !== -1) ? raw.slice(start, end + 1) : "[]";
     try {
       signals = JSON.parse(cleaned);
+      // normalize common location misspellings
+      const locationFixes = {
+        "afrika": "Africa",
+        "américa": "America",
+        "america": "America",
+        "eeuu": "United States",
+        "usa": "United States",
+        "u.s.a.": "United States",
+        "u.s.": "United States",
+        "uk": "United Kingdom",
+        "u.k.": "United Kingdom",
+      };
+      signals = signals.map(s => ({
+        ...s,
+        location: locationFixes[s.location?.toLowerCase()] || s.location,
+      }));
       log("✅", `Synthesize done — ${signals.length} signal(s) extracted`);
+      signals.forEach(s => log("📍", `${s.source} | ${s.disease} | ${s.location} | lat:${s.lat} lng:${s.lng}`));
     } catch {
       log("⚠️", "Synthesize: failed to parse Claude response as JSON");
       signals = [];
