@@ -496,7 +496,7 @@ export default function App() {
               zoomControl={false} attributionControl={false}
             >
               <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution="" />
-              {signals.filter(sig => sig.lat && sig.lng).map((sig, i) => {
+              {signals.filter(sig => sig.lat != null && sig.lng != null && !(sig.lat === 0 && sig.lng === 0)).map((sig, i) => {
                 const isHovered = hoveredSignal && hoveredSignal.disease === sig.disease && hoveredSignal.location === sig.location;
                 return (
                   <CircleMarker

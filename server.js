@@ -190,8 +190,8 @@ Given a list of news/health report headlines and descriptions, return a JSON arr
 Each signal must have:
   - title: string (short headline)
   - location: string (city, country, or region — infer from text; use "Global" if unclear; ALWAYS use standard English spelling e.g. "Africa" not "Afrika", "United States" not "USA")
-  - lat: number (approximate latitude of location; use 0 if truly unknown)
-  - lng: number (approximate longitude of location; use 0 if truly unknown)
+  - lat: number (approximate latitude; for United States use 38.0, for Global use 20.0; never use 0 as a default — always estimate a real coordinate)
+  - lng: number (approximate longitude; for United States use -97.0, for Global use 0.0; never use 0 as a default for lat)
   - severity: "low" | "medium" | "high"
   - disease: string (disease or syndrome name; use "General Health Alert" if unspecified)
   - source: string (the source field from the input item)
@@ -249,8 +249,31 @@ Respond with ONLY a valid JSON array, no markdown, no explanation.`;
         ...s,
         location: locationFixes[s.location?.toLowerCase()] || s.location,
       }));
+      // jitter signals that share identical coordinates so they don't stack
+      const coordCount = {};
+      signals = signals.map(s => {
+        const key = `${s.lat},${s.lng}`;
+        coordCount[key] = (coordCount[key] || 0) + 1;
+        const n = coordCount[key] - 1;
+        if (n === 0) return s;
+        const angle = (n * 137.5 * Math.PI) / 180; // golden angle spread
+        const radius = 0.8 + Math.floor(n / 8) * 0.8;
+        return {
+          ...s,
+          lat: parseFloat((s.lat + radius * Math.cos(angle)).toFixed(4)),
+          lng: parseFloat((s.lng + radius * Math.sin(angle)).toFixed(4)),
+        };
+      });
       log("✅", `Synthesize done — ${signals.length} signal(s) extracted`);
-      signals.forEach(s => log("📍", `${s.source} | ${s.disease} | ${s.location} | lat:${s.lat} lng:${s.lng}`));
+      const bySrc = {};
+      signals.forEach(s => {
+        bySrc[s.source] = bySrc[s.source] || [];
+        bySrc[s.source].push(`${s.disease} @ ${s.location} (${s.lat},${s.lng})`);
+      });
+      Object.entries(bySrc).forEach(([src, list]) => {
+        log("📊", `${src.toUpperCase()} signals (${list.length}):`);
+        list.forEach(l => log("   ↳", l));
+      });
     } catch {
       log("⚠️", "Synthesize: failed to parse Claude response as JSON");
       signals = [];
