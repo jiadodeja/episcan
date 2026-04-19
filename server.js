@@ -8,9 +8,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const ts = () => new Date().toISOString().slice(11, 23);
+const log = (emoji, msg) => console.log(`[${ts()}] ${emoji}  ${msg}`);
+
 // ── Claude chat ──────────────────────────────────────────────────────────────
 app.post("/api/chat", async (req, res) => {
   const { messages, system } = req.body;
+  log("💬", `Chat request — ${messages?.length ?? 0} message(s)`);
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -19,24 +23,38 @@ app.post("/api/chat", async (req, res) => {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-3-5-haiku-20241022",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 1024,
       system: system || "",
       messages,
     }),
   });
   const data = await response.json();
+  log("✅", `Chat response — stop_reason: ${data.stop_reason ?? "unknown"}`);
   res.json(data);
 });
 
 // ── RSS proxy helper ─────────────────────────────────────────────────────────────
 async function fetchRSS(url) {
+  log("🌐", `Fetching RSS: ${url}`);
   const res = await fetch(url, {
     headers: { "User-Agent": "EpiScan/1.0 (health surveillance research)" },
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  log("📥", `RSS OK: ${url}`);
   return res.text();
+}
+
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#\d+;/g, m => String.fromCharCode(parseInt(m.slice(2, -1))));
 }
 
 function parseRSSItems(xml) {
@@ -54,13 +72,19 @@ function parseRSSItems(xml) {
     const link    = get("link") || get("guid");
     const pubDate = get("pubDate");
     const desc    = get("description");
-    if (title) items.push({ title, link, pubDate, description: desc });
+    if (title) items.push({
+      title:       decodeHtmlEntities(title),
+      link:        decodeHtmlEntities(link),
+      pubDate,
+      description: decodeHtmlEntities(desc),
+    });
   }
   return items;
 }
 
 // ── CDC RSS endpoint ──────────────────────────────────────────────────────────────
 app.get("/api/feeds/cdc", async (req, res) => {
+  log("📡", "CDC feed request received");
   try {
     // CDC Morbidity and Mortality Weekly Report + outbreak notices
     const urls = [
@@ -72,14 +96,19 @@ app.get("/api/feeds/cdc", async (req, res) => {
       .filter(r => r.status === "fulfilled")
       .flatMap(r => parseRSSItems(r.value))
       .slice(0, 20);
+    const failed = results.filter(r => r.status === "rejected").length;
+    if (failed) log("⚠️", `CDC: ${failed} feed(s) failed`);
+    log("✅", `CDC feed done — ${items.length} items returned`);
     res.json({ source: "cdc", count: items.length, items });
   } catch (err) {
+    log("❌", `CDC feed error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ── Google News RSS endpoint ──────────────────────────────────────────────────────────
 app.get("/api/feeds/news", async (req, res) => {
+  log("📡", "News feed request received");
   try {
     const queries = [
       "disease outbreak",
@@ -100,8 +129,12 @@ app.get("/api/feeds/news", async (req, res) => {
         return true;
       })
       .slice(0, 20);
+    const failed = results.filter(r => r.status === "rejected").length;
+    if (failed) log("⚠️", `News: ${failed} feed(s) failed`);
+    log("✅", `News feed done — ${items.length} items returned`);
     res.json({ source: "news", count: items.length, items });
   } catch (err) {
+    log("❌", `News feed error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -109,19 +142,26 @@ app.get("/api/feeds/news", async (req, res) => {
 // ── Synthesizer: ask Claude to extract location + severity from items ───────
 app.post("/api/synthesize", async (req, res) => {
   const { items } = req.body; // array of { title, description, source }
-  if (!items?.length) return res.json({ signals: [] });
+  log("🧠", `Synthesize request — ${items?.length ?? 0} items received`);
+  log("📋", `Sample item: ${JSON.stringify(items[0]).slice(0, 200)}`);
+  log("📝", `All titles:\n${items.map((it, i) => `  [${i+1}] [${it.source}] ${it.title}`).join("\n")}`);
+  if (!items?.length) {
+    log("⚠️", "Synthesize: no items, returning empty");
+    return res.json({ signals: [] });
+  }
 
-  const system = `You are an epidemiological signal extractor.
+  const system = `You are an epidemiological signal extractor for a public health surveillance dashboard.
 Given a list of news/health report headlines and descriptions, return a JSON array of signals.
 Each signal must have:
   - title: string (short headline)
-  - location: string (city, country, or region — infer from text; use "Unknown" if unclear)
-  - lat: number (approximate latitude of location)
-  - lng: number (approximate longitude of location)
+  - location: string (city, country, or region — infer from text; use "Global" if unclear)
+  - lat: number (approximate latitude of location; use 0 if truly unknown)
+  - lng: number (approximate longitude of location; use 0 if truly unknown)
   - severity: "low" | "medium" | "high"
-  - disease: string (disease or syndrome name, or "Unknown")
-  - source: string ("cdc" or "news")
-Only include items that describe a real or potential disease outbreak or public health threat.
+  - disease: string (disease or syndrome name; use "General Health Alert" if unspecified)
+  - source: string (the source field from the input item)
+Be INCLUSIVE: extract a signal for any item related to disease, illness, infection, health alert, outbreak, epidemic, pandemic, vaccination, or public health concern — even if it seems minor or routine.
+Do NOT filter items out unless they are completely unrelated to health (e.g. sports, finance, weather).
 Respond with ONLY a valid JSON array, no markdown, no explanation.`;
 
   const userMsg = items
@@ -137,18 +177,34 @@ Respond with ONLY a valid JSON array, no markdown, no explanation.`;
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-3-5-haiku-20241022",
-        max_tokens: 2048,
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 8096,
         system,
         messages: [{ role: "user", content: userMsg }],
       }),
     });
     const data = await response.json();
+    if (data.error) {
+      log("❌", `Anthropic API error: ${data.error.type} — ${data.error.message}`);
+      return res.status(500).json({ error: data.error.message });
+    }
     const raw = data.content?.[0]?.text || "[]";
+    log("📄", `Claude raw response (${raw.length} chars): ${raw.slice(0, 300)}`);
     let signals = [];
-    try { signals = JSON.parse(raw); } catch { signals = []; }
+    // extract the JSON array directly — find first [ and last ]
+    const start = raw.indexOf("[");
+    const end = raw.lastIndexOf("]");
+    const cleaned = (start !== -1 && end !== -1) ? raw.slice(start, end + 1) : "[]";
+    try {
+      signals = JSON.parse(cleaned);
+      log("✅", `Synthesize done — ${signals.length} signal(s) extracted`);
+    } catch {
+      log("⚠️", "Synthesize: failed to parse Claude response as JSON");
+      signals = [];
+    }
     res.json({ signals });
   } catch (err) {
+    log("❌", `Synthesize error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
