@@ -3,7 +3,7 @@ import { MapContainer, TileLayer, CircleMarker, Tooltip } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import "./App.css";
 
-const API = "http://localhost:3001";
+const API = ""; // Vercel: API routes served from same origin
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
