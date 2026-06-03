@@ -49,6 +49,4 @@ You'll need an Anthropic API key in a `.env` file:
 ANTHROPIC_API_KEY=your_key_here
 ```
 
-## Live demo
 
-[episcan-opal.vercel.app](https://episcan-opal.vercel.app)
