@@ -4,7 +4,7 @@ A real-time disease outbreak surveillance dashboard. Three AI agents automatical
 
 ## What it does
 
-When you open EpiScan, a pipeline fires automatically. One agent scans Google News for early warning headlines, another reads CDC and CIDRAP official health reports, and a third uses Claude to cross-reference both and decide what's actually worth flagging. The results show up as color-coded markers on a world map — red for high severity, amber for moderate, green for low.
+When you open EpiScan, a pipeline fires automatically. One agent scans Google News for early warning headlines, another reads CDC and CIDRAP official health reports, and a third uses Claude to cross-reference both and decide what's actually worth flagging. The results show up as color-coded markers on a world map (red for high severity, amber for moderate, green for low).
 
 Each marker shows the disease name, location, confidence level, and source when you hover over it.
 
